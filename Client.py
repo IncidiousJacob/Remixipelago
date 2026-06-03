@@ -62,8 +62,11 @@ SCREEN_1P_CHARACTER_SELECT = 0x11
 SCREEN_STAGE_INTRO = 0x0E
 SCREEN_WIN = 0x30
 SCREEN_STAGE_CLEAR = 0x33
-CLASSIC_CPU_RANDOMIZE_BURST_TICKS = 999999
+CLASSIC_CPU_RANDOMIZE_BURST_TICKS = 180
 CLASSIC_CPU_MENU_VALUE = 0x1C
+# Smash Remix crashes if Classic CPU bytes are randomized for special internal
+# fights that use nonstandard actor/team setup.
+CLASSIC_CPU_RANDOMIZE_EXCLUDED_FIGHTS = {"Fighting Polygon Team", "Master Hand"}
 
 SMASH_CASH_PER_FIGHT_WIN = 10
 SMASH_CASH_MASTER_HAND_BONUS = 40  # total Master Hand reward becomes 50
@@ -742,6 +745,19 @@ class SmashRemixBizHawkClient(BizHawkClient):
     def _cpu_slots_are_menu_values(self, cpu_values: list[int]) -> bool:
         return bool(cpu_values) and int(cpu_values[0]) == CLASSIC_CPU_MENU_VALUE
 
+    def _is_cpu_randomizer_fight_excluded_by_name(self, fight_name: str | None) -> bool:
+        return fight_name in CLASSIC_CPU_RANDOMIZE_EXCLUDED_FIGHTS
+
+    def _is_cpu_randomizer_fight_index_excluded(self, fight_index: int) -> bool:
+        if fight_index < 0 or fight_index >= len(CLASSIC_FIGHTS):
+            return True
+        return self._is_cpu_randomizer_fight_excluded_by_name(CLASSIC_FIGHTS[fight_index])
+
+    def _clear_classic_cpu_randomizer(self) -> None:
+        self.classic_cpu_randomize_key = None
+        self.classic_cpu_randomize_values = None
+        self.classic_cpu_randomize_ticks = 0
+
     async def _prime_classic_cpu_randomizer_for_next_fight(
         self,
         ctx: "BizHawkClientContext",
@@ -751,6 +767,9 @@ class SmashRemixBizHawkClient(BizHawkClient):
         repeats: int = 8,
     ) -> None:
         if not self._is_classic_cpu_randomizer_enabled(ctx):
+            return
+        if self._is_cpu_randomizer_fight_index_excluded(int(fight_index)):
+            self._clear_classic_cpu_randomizer()
             return
         values = self._get_classic_cpu_randomizer_values_for_fight_index(ctx, char_id, difficulty_value, fight_index)
         if values is None:
@@ -771,7 +790,10 @@ class SmashRemixBizHawkClient(BizHawkClient):
         if fight_name not in CLASSIC_FIGHTS:
             return
         next_fight_index = CLASSIC_FIGHTS.index(fight_name) + 1
-        while next_fight_index < len(CLASSIC_FIGHTS) and CLASSIC_FIGHTS[next_fight_index] == "Master Hand":
+        while (
+            next_fight_index < len(CLASSIC_FIGHTS)
+            and self._is_cpu_randomizer_fight_index_excluded(next_fight_index)
+        ):
             next_fight_index += 1
         if next_fight_index >= len(CLASSIC_FIGHTS):
             self.classic_cpu_randomize_key = None
@@ -809,6 +831,20 @@ class SmashRemixBizHawkClient(BizHawkClient):
         one_p_mode_char_id = read_values[5][0]
         cpu_values = [entry[0] for entry in read_values[6:]]
 
+        # Smash Remix is much more fragile than base Smash 64 during bonus/loading/result
+        # states. Do not write Classic CPU bytes while Break the Targets / bonus
+        # screens are active or while the game is between fights. This was causing
+        # TL exception crashes on the Target bonus screen.
+        if game_state in {STATE_BTT, STATE_LOADING, STATE_RESULTS}:
+            return
+        if screen_id not in {SCREEN_1P_CHARACTER_SELECT, SCREEN_STAGE_INTRO} and stage_id not in CLASSIC_FIGHT_NAME_BY_STAGE_ID:
+            return
+
+        current_fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(stage_id)
+        if self._is_cpu_randomizer_fight_excluded_by_name(current_fight_name):
+            self._clear_classic_cpu_randomizer()
+            return
+
         if screen_id == SCREEN_1P_CHARACTER_SELECT:
             if selected_char_id in CHARACTER_NAME_BY_SELECT_VALUE:
                 char_id = selected_char_id
@@ -836,10 +872,13 @@ class SmashRemixBizHawkClient(BizHawkClient):
         if game_state == STATE_IN_BATTLE and stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID:
             fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(stage_id)
             if fight_name in CLASSIC_FIGHTS:
-                self.classic_cpu_next_fight_index = min(CLASSIC_FIGHTS.index(fight_name) + 1, len(CLASSIC_FIGHTS) - 1)
+                next_index = min(CLASSIC_FIGHTS.index(fight_name) + 1, len(CLASSIC_FIGHTS) - 1)
+                while next_index < len(CLASSIC_FIGHTS) and self._is_cpu_randomizer_fight_index_excluded(next_index):
+                    next_index += 1
+                self.classic_cpu_next_fight_index = min(next_index, len(CLASSIC_FIGHTS) - 1)
         elif stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID:
             fight_name = CLASSIC_FIGHT_NAME_BY_STAGE_ID.get(stage_id)
-            if fight_name in CLASSIC_FIGHTS and fight_name != "Master Hand":
+            if fight_name in CLASSIC_FIGHTS and not self._is_cpu_randomizer_fight_excluded_by_name(fight_name):
                 fight_index = CLASSIC_FIGHTS.index(fight_name)
                 key = (int(char_id), int(fight_index), int(difficulty_value))
                 if self.classic_cpu_randomize_key != key or self.classic_cpu_randomize_values is None:
@@ -850,12 +889,11 @@ class SmashRemixBizHawkClient(BizHawkClient):
         if self.classic_cpu_randomize_ticks <= 0 or not self.classic_cpu_randomize_values:
             return
 
-        if (
-            screen_id in {SCREEN_1P_CHARACTER_SELECT, SCREEN_STAGE_INTRO, SCREEN_WIN, SCREEN_STAGE_CLEAR}
-            or game_state != STATE_IN_BATTLE
-            or stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID
-            or self._cpu_slots_are_menu_values(cpu_values)
-        ):
+        safe_to_write_cpu_bytes = (
+            screen_id in {SCREEN_1P_CHARACTER_SELECT, SCREEN_STAGE_INTRO}
+            or (stage_id in CLASSIC_FIGHT_NAME_BY_STAGE_ID and self._cpu_slots_are_menu_values(cpu_values))
+        )
+        if safe_to_write_cpu_bytes:
             await self._write_classic_cpu_characters(ctx, self.classic_cpu_randomize_values, repeats=1)
 
     def _is_classic_fight_state(self, game_state: int, stage_id: int) -> bool:
