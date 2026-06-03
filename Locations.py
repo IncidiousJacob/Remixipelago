@@ -181,3 +181,6 @@ master_hand_location_ids_by_difficulty = {
 
 class SmashRemixLocation(Location):
     game = "Smash Remix"
+
+class SmashRemixLocation(Location):
+    game = "Smash Remix"
