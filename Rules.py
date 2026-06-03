@@ -20,3 +20,4 @@ def set_rules(world):
                 return state.has(f"{c} Fighter Pass", player)
 
         set_rule(multiworld.get_location(location_name, player), rule)
+
