@@ -1,0 +1,10 @@
+# Character available at the start. That character's Fighter Pass is precollected.
+# Use random to pick one supported fighter during generation.
+# Valid values:
+# mario, fox, dk, samus, luigi, link, yoshi, captain_falcon, kirby, pikachu,
+# jigglypuff, ness, falco, ganondorf, young_link, dr_mario, wario, bowser,
+# wolf, conker, mewtwo, marth, sonic, sheik, marina, king_dedede, goemon,
+# banjo_kazooie, crash, peach, random
+starting_character: mario
+# Beat Master Hand / clear Classic Mode with this many different characters to finish.
+required_classic_completions: 8
